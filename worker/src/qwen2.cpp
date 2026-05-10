@@ -134,6 +134,7 @@ bool Qwen2Model::load(const std::string& model_dir) {
 void Qwen2Model::reset_kv_cache() {
     for (auto& v : kv_cache.k_cache) std::fill(v.begin(), v.end(), 0);
     for (auto& v : kv_cache.v_cache) std::fill(v.begin(), v.end(), 0);
+    kv_cache.cur_pos = 0;
 }
 
 // ============================================================
@@ -148,11 +149,8 @@ std::vector<float> Qwen2Model::forward(const std::vector<int>& tokens) {
     int kv_dim     = n_kv_heads * head_dim;
     int IS         = c.intermediate_size;
     int seq        = (int)tokens.size();
-
-    // 当前已有的 KV 长度（从 k_cache[0] 推算）
-    // 简单实现：由调用方维护 pos，这里每次推理视为从 pos=0 开始
-    // 实际使用中应传入 pos 参数；此处第一版先不用 KV Cache（纯全量推理）
-    // TODO: 接入 KV Cache 后改成增量 decode
+    int pos        = kv_cache.cur_pos;    // 历史 KV 长度
+    int total_len  = pos + seq;           // 本次处理后的总长度
 
     // ---------- hidden_state [seq, H] ----------
     std::vector<float> hidden(seq * H);
@@ -191,47 +189,58 @@ std::vector<float> Qwen2Model::forward(const std::vector<int>& tokens) {
         vec_add_bias(k.data(), L.k_bias.data(), seq, kv_dim);
         vec_add_bias(v.data(), L.v_bias.data(), seq, kv_dim);
 
-        // ---- 3. RoPE ----
+        // ---- 3. RoPE（使用绝对位置）----
         for (int s = 0; s < seq; ++s) {
             apply_rope(q.data() + s * H,
                        k.data() + s * kv_dim,
                        n_heads, n_kv_heads, head_dim,
-                       s, c.rope_theta);
+                       pos + s, c.rope_theta);
         }
 
-        // ---- 4. Attention（CPU，纯全量，不走 KV cache）----
-        // scores[s_q, s_k] = (q[s_q, h] · k[s_k, h]) / sqrt(head_dim)
-        // 输出 attn_out[seq, H]
+        // ---- 4. 写入 KV Cache ----
+        uint16_t* kc = kv_cache.k_cache[li].data();
+        uint16_t* vc = kv_cache.v_cache[li].data();
+        for (int s = 0; s < seq; ++s) {
+            const float* ksrc = k.data() + s * kv_dim;
+            const float* vsrc = v.data() + s * kv_dim;
+            uint16_t* kdst = kc + (pos + s) * kv_dim;
+            uint16_t* vdst = vc + (pos + s) * kv_dim;
+            for (int d = 0; d < kv_dim; ++d) {
+                kdst[d] = f32_to_f16(ksrc[d]);
+                vdst[d] = f32_to_f16(vsrc[d]);
+            }
+        }
+
+        // ---- 5. Attention（使用 KV Cache，scores[seq, total_len]）----
         float scale = 1.0f / sqrtf((float)head_dim);
         std::vector<float> attn_out(seq * H, 0.0f);
 
         for (int h = 0; h < n_heads; ++h) {
-            int kv_h = h / (n_heads / n_kv_heads);  // GQA 头映射
+            int kv_h = h / (n_heads / n_kv_heads);
 
-            // scores [seq, seq]
-            std::vector<float> scores(seq * seq);
+            // scores[sq, sk]：sq 是当前新 token，sk 遍历全部历史 + 当前
+            std::vector<float> scores(seq * total_len);
             for (int sq = 0; sq < seq; ++sq) {
-                for (int sk = 0; sk < seq; ++sk) {
-                    // causal mask
-                    if (sk > sq) { scores[sq * seq + sk] = -1e9f; continue; }
+                int abs_sq = pos + sq;  // 当前 query 的绝对位置
+                for (int sk = 0; sk < total_len; ++sk) {
+                    if (sk > abs_sq) { scores[sq * total_len + sk] = -1e9f; continue; }
                     float dot = 0.0f;
                     const float* qh = q.data() + sq * H + h * head_dim;
-                    const float* kh = k.data() + sk * kv_dim + kv_h * head_dim;
-                    for (int d = 0; d < head_dim; ++d) dot += qh[d] * kh[d];
-                    scores[sq * seq + sk] = dot * scale;
+                    const uint16_t* kh = kc + sk * kv_dim + kv_h * head_dim;
+                    for (int d = 0; d < head_dim; ++d)
+                        dot += qh[d] * f16_to_f32(kh[d]);
+                    scores[sq * total_len + sk] = dot * scale;
                 }
             }
-            // softmax per query
-            softmax(scores.data(), seq, seq);
+            softmax(scores.data(), seq, total_len);
 
-            // weighted sum of V
             for (int sq = 0; sq < seq; ++sq) {
                 float* out_row = attn_out.data() + sq * H + h * head_dim;
-                for (int sk = 0; sk < seq; ++sk) {
-                    const float* vh = v.data() + sk * kv_dim + kv_h * head_dim;
-                    float w = scores[sq * seq + sk];
+                for (int sk = 0; sk < total_len; ++sk) {
+                    const uint16_t* vh = vc + sk * kv_dim + kv_h * head_dim;
+                    float w = scores[sq * total_len + sk];
                     for (int d = 0; d < head_dim; ++d)
-                        out_row[d] += w * vh[d];
+                        out_row[d] += w * f16_to_f32(vh[d]);
                 }
             }
         }
@@ -291,6 +300,9 @@ std::vector<float> Qwen2Model::forward(const std::vector<int>& tokens) {
     std::vector<uint16_t> lm_in(H), lm_out(config.vocab_size);
     f32_to_f16_vec(last.data(), lm_in.data(), H);
     lm_head.forward(lm_in.data(), 1, lm_out.data());
+
+    // 更新 KV Cache 位置指针
+    kv_cache.cur_pos = total_len;
 
     // FP16 logits -> FP32
     std::vector<float> logits(config.vocab_size);

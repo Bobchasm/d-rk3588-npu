@@ -3,7 +3,7 @@ from transformers import AutoConfig
 import torch
 import json, os
 
-model_path = "./Qwen1.5B"  # 你下载的路径
+model_path = "../model/Qwen1.5B"  # 你下载的路径
 
 # 1. 看配置
 config = AutoConfig.from_pretrained(model_path)

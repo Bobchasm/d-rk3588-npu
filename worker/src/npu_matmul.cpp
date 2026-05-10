@@ -30,6 +30,8 @@ bool NpuLinear::init(int k, int n, const uint16_t* weight_kn) {
     B_mem = rknn_create_mem(ctx, io_attr.B.size);
     if (!B_mem) {
         fprintf(stderr, "[NpuLinear] rknn_create_mem(B) failed\n");
+        rknn_matmul_destroy(ctx);  // 防止 ctx 泄漏
+        ctx = 0;
         return false;
     }
 

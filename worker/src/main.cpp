@@ -4,7 +4,20 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <csignal>
 #include <sys/time.h>
+
+static Qwen2Model* g_model_ptr = nullptr;
+
+static void sig_cleanup(int sig) {
+    fprintf(stderr, "\n[信号%d] 正在释放 NPU handles...\n", sig);
+    if (g_model_ptr) {
+        g_model_ptr->layers.clear();   // 触发 ~TransformerLayer -> ~NpuLinear
+        g_model_ptr->lm_head.destroy();
+        g_model_ptr = nullptr;
+    }
+    _exit(0);
+}
 
 static int64_t now_us() {
     struct timeval tv;
@@ -29,6 +42,9 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    std::signal(SIGINT,  sig_cleanup);
+    std::signal(SIGTERM, sig_cleanup);
+
     std::string model_dir = argv[1];
     std::vector<int> input_ids;
     for (int i = 2; i < argc; ++i)
@@ -38,8 +54,8 @@ int main(int argc, char* argv[]) {
     printf("输入 token 数量: %d\n", (int)input_ids.size());
     for (int id : input_ids) printf("  %d\n", id);
 
-    // 加载模型
     Qwen2Model model;
+    g_model_ptr = &model;
     printf("\n开始加载模型...\n");
     int64_t t0 = now_us();
     if (!model.load(model_dir)) {
@@ -48,49 +64,51 @@ int main(int argc, char* argv[]) {
     }
     printf("模型加载完成，耗时 %.1f s\n", (now_us() - t0) / 1e6f);
 
-    // 推理 + 贪心生成最多 50 个 token
     const int max_new_tokens = 10;
     std::vector<int> all_tokens = input_ids;
 
-    printf("\n开始推理...\n");
+    // ---- Prefill ----
+    model.reset_kv_cache();
+    printf("\n[Prefill] %d 个输入 token...\n", (int)input_ids.size());
+    int64_t ts0 = now_us();
+    auto logits = model.forward(input_ids);
+    printf("[Prefill] 耗时 %.0f ms\n", (now_us() - ts0) / 1e3f);
+
+    int next_id = greedy_sample(logits);
+
+    // ---- Decode ----
+    printf("\n[Decode]\n");
     int64_t t_infer_start = now_us();
     int generated = 0;
     for (int step = 0; step < max_new_tokens; ++step) {
-        int64_t ts = now_us();
-
-        // 每步都传完整 token 序列（无 KV Cache，正确但慢）
-        // TODO: 接入 KV Cache 后改成增量 decode
-        std::vector<int> cur_input = all_tokens;
-
-        auto logits = model.forward(cur_input);
-        int next_id = greedy_sample(logits);
-
-        int64_t elapsed = now_us() - ts;
-
-        // 打印 top-5，便于验证是否输出合理
-        std::vector<std::pair<float, int>> top;
-        for (int i = 0; i < (int)logits.size(); ++i)
-            top.push_back({logits[i], i});
-        std::partial_sort(top.begin(), top.begin() + 5, top.end(),
-            [](const std::pair<float,int>& a, const std::pair<float,int>& b){ return a.first > b.first; });
-        printf("step %2d (%.0f ms): top5 = ", step, elapsed / 1e3f);
-        for (int i = 0; i < 5; ++i)
-            printf("[%d:%.2f] ", top[i].second, top[i].first);
-        printf("-> next=%d\n", next_id);
-
-        // 检查 EOS（Qwen 的 EOS id = 151645）
         if (next_id == 151645 || next_id == 151643) {
-            printf("[EOS]\n");
+            printf("step %2d: [EOS]\n", step);
             break;
         }
 
         all_tokens.push_back(next_id);
         ++generated;
+
+        int64_t ts = now_us();
+        logits = model.forward({next_id});   // 单 token decode
+        int64_t elapsed = now_us() - ts;
+
+        std::vector<std::pair<float, int>> top;
+        for (int i = 0; i < (int)logits.size(); ++i)
+            top.push_back({logits[i], i});
+        std::partial_sort(top.begin(), top.begin() + 5, top.end(),
+            [](const std::pair<float,int>& a, const std::pair<float,int>& b){ return a.first > b.first; });
+        printf("step %2d (%.0f ms): emit=%d  top5=", step, elapsed / 1e3f, next_id);
+        for (int i = 0; i < 5; ++i)
+            printf("[%d:%.2f] ", top[i].second, top[i].first);
+        printf("\n");
+
+        next_id = greedy_sample(logits);
     }
 
     float total_s = (now_us() - t_infer_start) / 1e6f;
     printf("\n生成完成：%d tokens，总耗时 %.1f s，平均 %.2f tok/s\n",
-           generated, total_s, generated / total_s);
+           generated, total_s, generated > 0 ? generated / total_s : 0.0f);
 
     printf("\n输出 token ids:");
     for (int i = (int)input_ids.size(); i < (int)all_tokens.size(); ++i)

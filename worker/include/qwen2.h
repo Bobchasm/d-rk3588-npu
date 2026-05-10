@@ -57,6 +57,7 @@ struct KVCache {
     std::vector<std::vector<uint16_t>> v_cache;
     int capacity = 0;  // 最大 position 数
     int kv_dim   = 0;  // num_kv_heads * head_dim
+    int cur_pos  = 0;  // 当前已写入的 position 数（prefill + decode 累加）
 };
 
 // ============================================================
