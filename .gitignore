@@ -1,0 +1,64 @@
+# Model files (large, not tracked)
+model/
+
+# Temp scripts
+dl_miniforge.py
+miniforge.sh
+
+# 生成的分析输出文件
+model/*.txt
+model/*.log
+
+# Build artifacts
+build/
+install/
+*.o
+*.a
+*.so
+*.so.*
+*.d
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+*.egg
+.venv/
+venv/
+env/
+
+# RKNN converted models
+*.rknn
+*.rkllm
+
+# ONNX exports
+*.onnx
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
+
+rknn-toolkit2/
