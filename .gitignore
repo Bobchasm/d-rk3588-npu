@@ -1,13 +1,10 @@
 # Model files (large, not tracked)
-model/
+# models/
+models/qwen1.5b/Qwen1.5B
 
 # Temp scripts
 dl_miniforge.py
 miniforge.sh
-
-# 生成的分析输出文件
-model/*.txt
-model/*.log
 
 # Build artifacts
 build/
@@ -57,8 +54,3 @@ Thumbs.db
 
 # Logs
 *.log
-
-# Jupyter
-.ipynb_checkpoints/
-
-rknn-toolkit2/

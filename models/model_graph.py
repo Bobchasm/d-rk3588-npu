@@ -8,8 +8,8 @@ Qwen1.5B (Qwen2ForCausalLM) 完整模型层布局分析
 import os, json, sys, io
 from safetensors import safe_open
 
-MODEL_PATH = "./Qwen1.5B"
-OUTPUT_FILE = "qwen1.5b_layout.txt"
+MODEL_PATH = "./qwen1.5b/Qwen1.5B"
+OUTPUT_FILE = "./qwen1.5b/qwen1.5b_layout.txt"
 
 # 同时输出到终端和文件
 class Tee:

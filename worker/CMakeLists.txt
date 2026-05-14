@@ -4,10 +4,10 @@ project(qwen2_demo CXX)
 set(CMAKE_CXX_STANDARD 14)
 
 # ---------- RKNN SDK 路径（相对于本文件）----------
-set(RKNN_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../rknn-toolkit2/rknpu2")
+set(RKNN_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/lib/rknpu2")
 set(RKNN_INC     "${RKNN_SDK_ROOT}/runtime/Linux/librknn_api/include")
 set(RKNN_LIB     "${RKNN_SDK_ROOT}/runtime/Linux/librknn_api/aarch64")
-set(FP16_INC     "${RKNN_SDK_ROOT}/examples/3rdparty/fp16/include")
+set(FP16_INC     "${RKNN_SDK_ROOT}/fp16/include")
 
 # ---------- 头文件 ----------
 include_directories(
